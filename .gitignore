@@ -1,0 +1,17 @@
+# Python caches
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# Virtualenvs
+**/.venv/
+
+# Local env real (el example sí se sube)
+.env
+
+# (opcional) editor/OS
+.DS_Store
+.vscode/
+.idea/
+
