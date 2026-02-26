@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: wfm
+      POSTGRES_USER: wfm
+      POSTGRES_PASSWORD: wfm_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  api:
+    build: ./backend
+    volumes:
+      - ./backend:/app
+    environment:
+      DATABASE_URL: postgresql+psycopg://wfm:wfm_pass@db:5432/wfm
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+
+  worker:
+    build: ./backend
+    volumes:
+      - ./backend:/app
+    command: celery -A app.workers.celery_app:celery_app worker --loglevel=INFO
+    environment:
+      DATABASE_URL: postgresql+psycopg://wfm:wfm_pass@db:5432/wfm
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+
+volumes:
+  dbdata:
+
