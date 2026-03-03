@@ -1,9 +1,14 @@
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from __future__ import annotations
+
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from openpyxl import load_workbook
 from io import BytesIO
 import re
 from decimal import Decimal
+from typing import Optional, List
+
+from pydantic import BaseModel, Field
 
 from app.core.db import get_db
 from app.models.requirements import Requirement
@@ -22,11 +27,136 @@ WEEKDAY_MAP = {
 
 H_COL_RE = re.compile(r"^H\d{4}$")
 
+
 def hcol_to_min(col: str) -> int:
     hh = int(col[1:3])
     mm = int(col[3:5])
     return hh * 60 + mm
 
+
+# -----------------------
+# GET /requirements (lista)
+# -----------------------
+class RequirementOut(BaseModel):
+    campaign_id: int
+    period: int
+    weekday: int = Field(ge=0, le=6)
+    minute: int = Field(ge=0, le=1430)
+    required: Decimal
+
+    class Config:
+        from_attributes = True  # pydantic v2
+
+
+@router.get("", response_model=list[RequirementOut])
+def list_requirements(
+    campaign_id: int = Query(..., ge=1),
+    period: int = Query(...),
+    weekday: Optional[int] = Query(None, ge=0, le=6),
+    db: Session = Depends(get_db),
+):
+    q = db.query(Requirement).filter(
+        Requirement.campaign_id == campaign_id,
+        Requirement.period == period,
+    )
+    if weekday is not None:
+        q = q.filter(Requirement.weekday == weekday)
+
+    rows = q.order_by(Requirement.weekday.asc(), Requirement.minute.asc()).all()
+    return rows
+
+
+# -----------------------
+# GET /requirements/series (48 slots)
+# -----------------------
+class RequirementSeriesOut(BaseModel):
+    campaign_id: int
+    period: int
+    weekday: int
+    minutes: List[int]
+    required: List[Optional[Decimal]]
+
+class RequirementWeekSeriesOut(BaseModel):
+    campaign_id: int
+    period: int
+    minutes: List[int]
+    weekdays: List[int]                 # [0..6]
+    series: List[RequirementSeriesOut]  # una por weekday
+
+
+@router.get("/series", response_model=RequirementSeriesOut)
+def requirements_series(
+    campaign_id: int = Query(..., ge=1),
+    period: int = Query(...),
+    weekday: int = Query(..., ge=0, le=6),
+    db: Session = Depends(get_db),
+):
+    rows = (
+        db.query(Requirement)
+        .filter(
+            Requirement.campaign_id == campaign_id,
+            Requirement.period == period,
+            Requirement.weekday == weekday,
+        )
+        .order_by(Requirement.minute.asc())
+        .all()
+    )
+
+    minutes = list(range(0, 24 * 60, 30))  # 0..1410
+    by_minute = {r.minute: r.required for r in rows}
+    series = [by_minute.get(m) for m in minutes]
+
+    return RequirementSeriesOut(
+        campaign_id=campaign_id,
+        period=period,
+        weekday=weekday,
+        minutes=minutes,
+        required=series,
+    )
+
+@router.get("/series/week", response_model=RequirementWeekSeriesOut)
+def requirements_series_week(
+    campaign_id: int = Query(..., ge=1),
+    period: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    rows = (
+        db.query(Requirement)
+        .filter(
+            Requirement.campaign_id == campaign_id,
+            Requirement.period == period,
+        )
+        .order_by(Requirement.weekday.asc(), Requirement.minute.asc())
+        .all()
+    )
+
+    minutes = list(range(0, 24 * 60, 30))  # 0..1410
+    by_wd_min = {(r.weekday, r.minute): r.required for r in rows}
+
+    series_list: List[RequirementSeriesOut] = []
+    for wd in range(7):
+        reqs = [by_wd_min.get((wd, m)) for m in minutes]
+        series_list.append(
+            RequirementSeriesOut(
+                campaign_id=campaign_id,
+                period=period,
+                weekday=wd,
+                minutes=minutes,
+                required=reqs,
+            )
+        )
+
+    return RequirementWeekSeriesOut(
+        campaign_id=campaign_id,
+        period=period,
+        minutes=minutes,
+        weekdays=list(range(7)),
+        series=series_list,
+    )
+
+# -----------------------
+# POST /requirements/import
+# -----------------------
 @router.post("/import")
 async def import_requirements(
     campaign_id: int = Form(...),
